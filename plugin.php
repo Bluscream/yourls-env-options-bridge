@@ -2,57 +2,64 @@
 /*
 Plugin Name: Environment Options Bridge
 Plugin URI: https://github.com/yourls/env-options-bridge
-Description: Dynamically overrides any option via environment variables starting with YOURLS_OPTION_ (e.g. YOURLS_OPTION_PS_TITLE overrides ps_title).
-Version: 1.0
+Description: Dynamically overrides any YOURLS option via environment variables (e.g. env var PS_TITLE overrides option ps_title).
+Version: 2.0
 Author: Antigravity.AI
 */
 
 if ( !defined( 'YOURLS_ABSPATH' ) ) die();
 
-// We can register filters dynamically on plugins_loaded for any options we want to support
-yourls_add_action( 'plugins_loaded', 'env_options_bridge_init' );
-
-function env_options_bridge_init() {
-    // List of option keys we want to check for env overrides
-    $options_to_bridge = [
-        'ps_site_key',
-        'ps_secret_key',
-        'ps_title',
-        'ps_subtitle',
-        'ps_bg_start',
-        'ps_bg_end',
-        'ps_text_primary',
-        'ps_text_secondary',
-        'ps_accent',
-        'ps_accent_hover',
-        'ozh_yourls_gsb',
-        'youtube_title_fix_api_key',
-        'fallback_url',
-        'random_shorturls_length',
-        'logo_suite_image_url',
-        'logo_suite_image_alt',
-        'logo_suite_image_title',
-        'logo_suite_custom_title',
-    ];
-
-    foreach ( $options_to_bridge as $option ) {
-        yourls_add_filter( 'shunt_option_' . $option, function( $value ) use ( $option ) {
-            // Check for direct uppercase env var (e.g. PS_TITLE)
-            $env_var_direct = strtoupper( $option );
-            $env_val = getenv( $env_var_direct );
-            if ( $env_val !== false && $env_val !== '' ) {
-                return $env_val;
-            }
-
-            // Also support a prefix namespace: YOURLS_OPTION_PS_TITLE
-            $env_var_prefixed = 'YOURLS_OPTION_' . strtoupper( $option );
-            $env_val = getenv( $env_var_prefixed );
-            if ( $env_val !== false && $env_val !== '' ) {
-                return $env_val;
-            }
-
-            // Return shunt_default if not overridden, so core query proceeds normally
-            return yourls_shunt_default();
-        } );
+class EnvOptionsBridgeArray extends ArrayObject {
+    public function offsetExists($key): bool {
+        $exists = parent::offsetExists($key);
+        if (!$exists && strpos($key, 'shunt_option_') === 0) {
+            return true; // Pretend the filter exists so YOURLS runs it
+        }
+        return $exists;
     }
+
+    #[\ReturnTypeWillChange]
+    public function offsetGet($key) {
+        $val = parent::offsetExists($key) ? parent::offsetGet($key) : null;
+        if (strpos($key, 'shunt_option_') === 0) {
+            $option_name = substr($key, 13); // Extract option name after 'shunt_option_'
+            
+            // Generate direct uppercase env var name (e.g. ps_title -> PS_TITLE)
+            $env_var = strtoupper($option_name);
+            
+            // Only intercept if the env var is set and non-empty
+            $env_val = getenv($env_var);
+            if ($env_val !== false && $env_val !== '') {
+                // Return a structure matching $yourls_filters hook format to hook in our override
+                $bridge_filter = [
+                    10 => [
+                        'env_options_bridge_override' => [
+                            'function' => function($value) use ($env_val) {
+                                return $env_val;
+                            },
+                            'accepted_args' => 1,
+                            'type' => 'filter'
+                        ]
+                    ]
+                ];
+                
+                if (is_array($val)) {
+                    return $bridge_filter + $val;
+                }
+                return $bridge_filter;
+            }
+        }
+        return $val;
+    }
+}
+
+// Replace the global filters array with our custom interceptor
+global $yourls_filters;
+if (is_array($yourls_filters)) {
+    $yourls_filters = new EnvOptionsBridgeArray($yourls_filters);
+} elseif ($yourls_filters instanceof ArrayObject) {
+    // If already an ArrayObject, copy its contents
+    $yourls_filters = new EnvOptionsBridgeArray($yourls_filters->getArrayCopy());
+} else {
+    $yourls_filters = new EnvOptionsBridgeArray();
 }
